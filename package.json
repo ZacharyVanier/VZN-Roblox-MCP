@@ -1,0 +1,31 @@
+{
+  "name": "vzn-roblox-mcp",
+  "version": "1.0.0",
+  "description": "Multi-Studio Roblox MCP Server by VZNZach \u2014 connect to and control multiple Roblox Studio instances simultaneously.",
+  "author": "Zachary Vanier (VZNZach)",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "vzn-roblox-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "roblox",
+    "mcp",
+    "roblox-studio",
+    "model-context-protocol"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.0",
+    "typescript": "^5.9.3"
+  }
+}

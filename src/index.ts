@@ -1,0 +1,414 @@
+#!/usr/bin/env node
+
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
+import { StudioScanner } from "./studio-scanner.js";
+import { StudioClient } from "./studio-client.js";
+import { StudioInstance } from "./types.js";
+
+// =============================================================
+//  VZN Roblox MCP — Multi-Studio Model Context Protocol Server
+//  by Zachary Vanier (VZNZach)
+// =============================================================
+
+const scanner = new StudioScanner();
+let selectedStudioId: string | null = null;
+let activeClient: StudioClient | null = null;
+
+/** Resolve the active studio, or return an error message. */
+async function getClient(): Promise<StudioClient | string> {
+  if (activeClient) return activeClient;
+
+  const studios = await scanner.scan();
+
+  if (studios.length === 0) {
+    return "No Roblox Studio instances detected. Make sure Studio is open and the VZN MCP plugin is installed.";
+  }
+
+  if (studios.length === 1) {
+    selectedStudioId = studios[0].id;
+    activeClient = new StudioClient(studios[0]);
+    return activeClient;
+  }
+
+  const list = studios
+    .map(
+      (s, i) =>
+        `  [${i + 1}] ${s.placeName} (port ${s.port}${s.placeId ? `, Place ID: ${s.placeId}` : ""})`
+    )
+    .join("\n");
+
+  return `Multiple Roblox Studio instances detected:\n${list}\n\nUse the select_studio tool to pick one before running commands.`;
+}
+
+function formatStudioList(studios: StudioInstance[]): string {
+  if (studios.length === 0) return "No active Roblox Studio instances found.";
+
+  return studios
+    .map(
+      (s, i) =>
+        `[${i + 1}] ${s.placeName}\n    ID: ${s.id}\n    Port: ${s.port}${
+          s.placeId ? `\n    Place ID: ${s.placeId}` : ""
+        }${s.gameId ? `\n    Game ID: ${s.gameId}` : ""}`
+    )
+    .join("\n\n");
+}
+
+// --- Server Setup ---
+
+const server = new McpServer({
+  name: "vzn-roblox-mcp",
+  version: "1.0.0",
+});
+
+// --- Studio Management Tools ---
+
+server.tool(
+  "list_studios",
+  "Scan for and list all running Roblox Studio instances",
+  {},
+  async () => {
+    const studios = await scanner.scan();
+    const current = selectedStudioId
+      ? `Currently selected: ${selectedStudioId}\n\n`
+      : "No studio selected yet.\n\n";
+
+    return {
+      content: [
+        { type: "text", text: current + formatStudioList(studios) },
+      ],
+    };
+  }
+);
+
+server.tool(
+  "select_studio",
+  "Select which Roblox Studio instance to send commands to",
+  {
+    id: z
+
+      .string()
+      .describe(
+        "The studio ID to select (from list_studios), or a 1-based index number"
+      ),
+  },
+  async ({ id }) => {
+    const studios = await scanner.scan();
+
+    if (studios.length === 0) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "No active Studio instances found. Is Studio open with the plugin installed?",
+          },
+        ],
+      };
+    }
+
+    let target: StudioInstance | undefined;
+    const index = parseInt(id, 10);
+
+    if (!isNaN(index) && index >= 1 && index <= studios.length) {
+      target = studios[index - 1];
+    } else {
+      target = studios.find((s) => s.id === id);
+    }
+
+    if (!target) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Studio "${id}" not found. Available:\n${formatStudioList(studios)}`,
+          },
+        ],
+      };
+    }
+
+    selectedStudioId = target.id;
+    activeClient = new StudioClient(target);
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Selected: ${target.placeName} (port ${target.port})`,
+        },
+      ],
+    };
+  }
+);
+
+// --- Code Execution ---
+
+server.tool(
+  "execute",
+  "Execute Luau code in the selected Roblox Studio instance",
+  {
+    code: z.string().describe("Luau code to execute in Studio"),
+  },
+  async ({ code }) => {
+    const client = await getClient();
+    if (typeof client === "string") {
+      return { content: [{ type: "text", text: client }] };
+    }
+
+    const res = await client.execute(code);
+    return {
+      content: [
+        {
+          type: "text",
+          text: res.success
+            ? String(res.data ?? "Executed successfully.")
+            : `Error: ${res.error}`,
+        },
+      ],
+    };
+  }
+);
+
+// --- Instance Exploration ---
+
+server.tool(
+  "get_children",
+  "Get children of an instance in the selected Studio",
+  {
+    path: z
+
+      .string()
+      .describe("Instance path, e.g. game.Workspace or game.ServerScriptService"),
+  },
+  async ({ path }) => {
+    const client = await getClient();
+    if (typeof client === "string") {
+      return { content: [{ type: "text", text: client }] };
+    }
+
+    const res = await client.getChildren(path);
+    return {
+      content: [
+        {
+          type: "text",
+          text: res.success
+            ? JSON.stringify(res.data, null, 2)
+            : `Error: ${res.error}`,
+        },
+      ],
+    };
+  }
+);
+
+server.tool(
+  "get_properties",
+  "Get properties of an instance in the selected Studio",
+  {
+    path: z
+
+      .string()
+      .describe("Instance path, e.g. game.Workspace.Part"),
+  },
+  async ({ path }) => {
+    const client = await getClient();
+    if (typeof client === "string") {
+      return { content: [{ type: "text", text: client }] };
+    }
+
+    const res = await client.getProperties(path);
+    return {
+      content: [
+        {
+          type: "text",
+          text: res.success
+            ? JSON.stringify(res.data, null, 2)
+            : `Error: ${res.error}`,
+        },
+      ],
+    };
+  }
+);
+
+// --- Script Tools ---
+
+server.tool(
+  "get_script_source",
+  "Get the source code of a script in the selected Studio",
+  {
+    path: z
+
+      .string()
+      .describe("Script path, e.g. game.ServerScriptService.Main"),
+  },
+  async ({ path }) => {
+    const client = await getClient();
+    if (typeof client === "string") {
+      return { content: [{ type: "text", text: client }] };
+    }
+
+    const res = await client.getScriptSource(path);
+    return {
+      content: [
+        {
+          type: "text",
+          text: res.success ? String(res.data) : `Error: ${res.error}`,
+        },
+      ],
+    };
+  }
+);
+
+server.tool(
+  "set_script_source",
+  "Set the source code of a script in the selected Studio",
+  {
+    path: z.string().describe("Script path, e.g. game.ServerScriptService.Main"),
+    source: z.string().describe("New Luau source code for the script"),
+  },
+  async ({ path, source }) => {
+    const client = await getClient();
+    if (typeof client === "string") {
+      return { content: [{ type: "text", text: client }] };
+    }
+
+    const res = await client.setScriptSource(path, source);
+    return {
+      content: [
+        {
+          type: "text",
+          text: res.success
+            ? "Script source updated."
+            : `Error: ${res.error}`,
+        },
+      ],
+    };
+  }
+);
+
+// --- Instance Manipulation ---
+
+server.tool(
+  "create_instance",
+  "Create a new instance in the selected Studio",
+  {
+    className: z.string().describe("Roblox class name, e.g. Part, Script, Folder"),
+    parent: z.string().describe("Parent path, e.g. game.Workspace"),
+    name: z.string().optional().describe("Optional name for the new instance"),
+    properties: z
+      .record(z.string(), z.unknown())
+      .optional()
+      .describe("Optional properties to set on creation"),
+  },
+  async ({ className, parent, name, properties }) => {
+    const client = await getClient();
+    if (typeof client === "string") {
+      return { content: [{ type: "text", text: client }] };
+    }
+
+    const res = await client.createInstance(className, parent, name, properties);
+    return {
+      content: [
+        {
+          type: "text",
+          text: res.success
+            ? `Created ${className}${name ? ` "${name}"` : ""} in ${parent}`
+            : `Error: ${res.error}`,
+        },
+      ],
+    };
+  }
+);
+
+server.tool(
+  "delete_instance",
+  "Delete an instance from the selected Studio",
+  {
+    path: z.string().describe("Instance path to delete"),
+  },
+  async ({ path }) => {
+    const client = await getClient();
+    if (typeof client === "string") {
+      return { content: [{ type: "text", text: client }] };
+    }
+
+    const res = await client.deleteInstance(path);
+    return {
+      content: [
+        {
+          type: "text",
+          text: res.success ? `Deleted ${path}` : `Error: ${res.error}`,
+        },
+      ],
+    };
+  }
+);
+
+server.tool(
+  "set_property",
+  "Set a property on an instance in the selected Studio",
+  {
+    path: z.string().describe("Instance path"),
+    property: z.string().describe("Property name, e.g. Position, BrickColor, Size"),
+    value: z.unknown().describe("Value to set"),
+  },
+  async ({ path, property, value }) => {
+    const client = await getClient();
+    if (typeof client === "string") {
+      return { content: [{ type: "text", text: client }] };
+    }
+
+    const res = await client.setProperty(path, property, value);
+    return {
+      content: [
+        {
+          type: "text",
+          text: res.success
+            ? `Set ${property} on ${path}`
+            : `Error: ${res.error}`,
+        },
+      ],
+    };
+  }
+);
+
+server.tool(
+  "search",
+  "Search for instances by name or class in the selected Studio",
+  {
+    query: z.string().describe("Search query (instance name or partial match)"),
+    className: z
+      .string()
+      .optional()
+      .describe("Optional: filter by class name, e.g. Part, Script"),
+  },
+  async ({ query, className }) => {
+    const client = await getClient();
+    if (typeof client === "string") {
+      return { content: [{ type: "text", text: client }] };
+    }
+
+    const res = await client.search(query, className);
+    return {
+      content: [
+        {
+          type: "text",
+          text: res.success
+            ? JSON.stringify(res.data, null, 2)
+            : `Error: ${res.error}`,
+        },
+      ],
+    };
+  }
+);
+
+// --- Start Server ---
+
+async function main() {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
+
+main().catch((err) => {
+  console.error("VZN Roblox MCP failed to start:", err);
+  process.exit(1);
+});
