@@ -1,68 +1,55 @@
-import { StudioInstance, PluginResponse, PING_TIMEOUT } from "./types.js";
+import { BridgeService } from "./bridge-service.js";
+import { PluginResponse } from "./types.js";
 
 /**
- * HTTP client for communicating with a specific Roblox Studio plugin instance.
+ * Client for communicating with a specific Roblox Studio plugin instance.
+ * Routes all commands through the BridgeService queue.
  */
 export class StudioClient {
-  private baseUrl: string;
-
-  constructor(public readonly studio: StudioInstance) {
-    this.baseUrl = `http://localhost:${studio.port}`;
-  }
+  constructor(
+    public readonly studioId: string,
+    private bridge: BridgeService
+  ) {}
 
   /**
-   * Send a raw request to the Studio plugin.
+   * Send a command to the studio via the bridge queue.
+   * The plugin will pick it up on its next poll cycle.
    */
-  private async request(
-    endpoint: string,
-    method: string = "GET",
-    body?: unknown
-  ): Promise<PluginResponse> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), PING_TIMEOUT * 4);
-
+  private async request(endpoint: string, data?: unknown): Promise<PluginResponse> {
     try {
-      const res = await fetch(`${this.baseUrl}${endpoint}`, {
-        method,
-        headers: body ? { "Content-Type": "application/json" } : undefined,
-        body: body ? JSON.stringify(body) : undefined,
-        signal: controller.signal,
-      });
-
-      return (await res.json()) as PluginResponse;
+      const result = await this.bridge.sendRequest(this.studioId, endpoint, data || {});
+      return result as PluginResponse;
     } catch (err) {
       return {
         success: false,
-        error: `Failed to reach Studio on port ${this.studio.port}: ${err}`,
+        error: err instanceof Error ? err.message : String(err),
       };
-    } finally {
-      clearTimeout(timeout);
     }
   }
 
   /** Execute Luau code in Studio and return the result. */
   async execute(code: string): Promise<PluginResponse> {
-    return this.request("/execute", "POST", { command: code });
+    return this.request("execute", { command: code });
   }
 
   /** Get children of an instance by path. */
   async getChildren(path: string): Promise<PluginResponse> {
-    return this.request("/children", "POST", { path });
+    return this.request("getChildren", { path });
   }
 
   /** Get properties of an instance by path. */
   async getProperties(path: string): Promise<PluginResponse> {
-    return this.request("/properties", "POST", { path });
+    return this.request("getProperties", { path });
   }
 
   /** Get the source of a script by path. */
   async getScriptSource(path: string): Promise<PluginResponse> {
-    return this.request("/scriptSource", "POST", { path });
+    return this.request("getScriptSource", { path });
   }
 
   /** Set the source of a script by path. */
   async setScriptSource(path: string, source: string): Promise<PluginResponse> {
-    return this.request("/setScriptSource", "POST", { path, source });
+    return this.request("setScriptSource", { path, source });
   }
 
   /** Create a new instance in Studio. */
@@ -72,12 +59,12 @@ export class StudioClient {
     name?: string,
     properties?: Record<string, unknown>
   ): Promise<PluginResponse> {
-    return this.request("/create", "POST", { className, parent, name, properties });
+    return this.request("createInstance", { className, parent, name, properties });
   }
 
   /** Delete an instance by path. */
   async deleteInstance(path: string): Promise<PluginResponse> {
-    return this.request("/delete", "POST", { path });
+    return this.request("deleteInstance", { path });
   }
 
   /** Set a property on an instance. */
@@ -86,11 +73,12 @@ export class StudioClient {
     property: string,
     value: unknown
   ): Promise<PluginResponse> {
-    return this.request("/setProperty", "POST", { path, property, value });
+    return this.request("setProperty", { path, property, value });
   }
 
   /** Search for instances by name or class. */
   async search(query: string, className?: string): Promise<PluginResponse> {
-    return this.request("/search", "POST", { query, className });
+    return this.request("search", { query, className });
   }
+
 }

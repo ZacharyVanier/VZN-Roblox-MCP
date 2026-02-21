@@ -2,57 +2,95 @@
 
 **Multi-Studio Roblox MCP Server** by Zachary Vanier (VZNZach)
 
-A Model Context Protocol (MCP) server that connects to **multiple Roblox Studio instances** simultaneously. When multiple Studios are open, it detects all of them and lets you choose which one to control.
+A Model Context Protocol (MCP) server that connects to **multiple Roblox Studio instances** simultaneously via a single HTTP bridge. Auto-detects all connected Studios and lets you choose which one to control.
 
 ## Features
 
-- Auto-detects all running Roblox Studio instances (scans ports 3002-3020)
-- Auto-selects if only one Studio is open
+- Single HTTP server with plugin polling architecture
+- Auto-discovers and registers multiple Studio instances
+- Auto-selects if only one Studio is connected
 - Prompts for selection when multiple Studios are detected
-- Execute Luau code in any connected Studio
-- Read/write script source code
+- Execute Luau code with output capture (prints show in Studio Output)
+- Read/write script source code via ScriptEditorService
 - Create, delete, and modify instances
 - Search for instances by name or class
 - Get instance properties and children
+- Exponential backoff and auto-reconnect on connection loss
+
+## Architecture
+
+```
+Claude Code <--stdio--> MCP Server <--HTTP--> Studio Plugin(s)
+```
+
+1. The Node.js MCP server starts an HTTP server on localhost (port 3002-3020)
+2. Each Studio plugin discovers the server, registers with a unique GUID
+3. Plugins poll for commands every 0.5s
+4. Claude sends commands via MCP tools, queued for the target Studio, plugin picks them up, executes, and returns results
 
 ## Setup
 
-### 1. Install & Build
+### 1. Clone and Build
 
 ```bash
+git clone https://github.com/ZacharyVanier/VZN-Roblox-MCP.git
+cd VZN-Roblox-MCP
 npm install
 npm run build
 ```
 
-### 2. Add to Claude Code
+### 2. Install the Studio Plugin
+
+Build the plugin with Rojo and install it:
 
 ```bash
-claude mcp add --transport stdio vzn-roblox-mcp -- node C:/Users/Zachary/Desktop/VZN-Roblox-MCP/dist/index.js
+cd plugin
+rojo build -o VZNMultiStudioMCP.rbxm
 ```
 
-### 3. Install the Studio Plugin
+Then move the `.rbxm` file to your Roblox plugins folder:
 
-Each Roblox Studio instance needs the MCP plugin installed. The plugin listens on a localhost HTTP port and responds to commands from this server.
+**Windows:**
+```
+%LOCALAPPDATA%\Roblox\Plugins\
+```
 
-Plugin must expose these endpoints:
-- `GET /info` — Returns `{ success, placeName, placeId, gameId, studioId }`
-- `POST /execute` — Runs Luau code
-- `POST /children` — Gets instance children
-- `POST /properties` — Gets instance properties
-- `POST /scriptSource` — Gets script source
-- `POST /setScriptSource` — Sets script source
-- `POST /create` — Creates instances
-- `POST /delete` — Deletes instances
-- `POST /setProperty` — Sets properties
-- `POST /search` — Searches instances
+**macOS:**
+```
+~/Documents/Roblox/Plugins/
+```
 
-Each Studio instance should listen on a **unique port** in the range 3002-3020. If a port is taken, the plugin should try the next one.
+Or in Studio: Plugins tab -> Plugins Folder -> drop the `.rbxm` file there.
+
+### 3. Add to Claude Code
+
+```bash
+claude mcp add --transport stdio vzn-roblox-mcp -- node /path/to/VZN-Roblox-MCP/dist/index.js
+```
+
+Or manually add to `~/.claude.json`:
+```json
+{
+  "mcpServers": {
+    "vzn-roblox-mcp": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/path/to/VZN-Roblox-MCP/dist/index.js"]
+    }
+  }
+}
+```
+
+### 4. Enable HTTP Requests in Studio
+
+The plugin needs HTTP access. In Roblox Studio:
+Game Settings -> Security -> Allow HTTP Requests -> ON
 
 ## Tools
 
 | Tool | Description |
 |------|-------------|
-| `list_studios` | Scan and list all running Studio instances |
+| `list_studios` | List all connected Studio instances |
 | `select_studio` | Pick which Studio to send commands to |
 | `execute` | Run Luau code in the selected Studio |
 | `get_children` | Get children of an instance |
@@ -64,13 +102,11 @@ Each Studio instance should listen on a **unique port** in the range 3002-3020. 
 | `set_property` | Set a property on an instance |
 | `search` | Search for instances by name/class |
 
-## How Multi-Studio Works
+## Requirements
 
-1. The MCP server scans localhost ports 3002-3020 for active Studio plugins
-2. Each Studio plugin responds with its place name, IDs, and a unique studio ID
-3. If one Studio is found, it's auto-selected
-4. If multiple are found, Claude is told to use `select_studio` to pick one
-5. All subsequent commands go to the selected Studio until changed
+- Node.js 18+
+- Roblox Studio with HTTP Requests enabled
+- Rojo (to build the plugin)
 
 ## License
 

@@ -3,54 +3,69 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { StudioScanner } from "./studio-scanner.js";
+import { BridgeService } from "./bridge-service.js";
+import { StudioRegistry } from "./studio-registry.js";
 import { StudioClient } from "./studio-client.js";
-import { StudioInstance } from "./types.js";
+import { startHttpServer } from "./http-server.js";
+import { StudioInfo } from "./types.js";
 
 // =============================================================
 //  VZN Roblox MCP — Multi-Studio Model Context Protocol Server
 //  by Zachary Vanier (VZNZach)
 // =============================================================
 
-const scanner = new StudioScanner();
+const bridge = new BridgeService();
+const registry = new StudioRegistry();
 let selectedStudioId: string | null = null;
 let activeClient: StudioClient | null = null;
 
 /** Resolve the active studio, or return an error message. */
-async function getClient(): Promise<StudioClient | string> {
-  if (activeClient) return activeClient;
-
-  const studios = await scanner.scan();
-
-  if (studios.length === 0) {
-    return "No Roblox Studio instances detected. Make sure Studio is open and the VZN MCP plugin is installed.";
+function getClient(): StudioClient | string {
+  // If we have an active client and it's still alive, use it
+  if (activeClient && registry.isAlive(activeClient.studioId)) {
+    return activeClient;
   }
 
+  // Clear stale selection
+  if (activeClient && !registry.isAlive(activeClient.studioId)) {
+    activeClient = null;
+    selectedStudioId = null;
+  }
+
+  const studios = registry.getActiveStudios();
+
+  if (studios.length === 0) {
+    return "No Roblox Studio instances connected. Make sure Studio is open and the VZN MCP plugin is installed.";
+  }
+
+  // Auto-select if only one studio is connected
   if (studios.length === 1) {
-    selectedStudioId = studios[0].id;
-    activeClient = new StudioClient(studios[0]);
+    selectedStudioId = studios[0].studioId;
+    activeClient = new StudioClient(studios[0].studioId, bridge);
     return activeClient;
   }
 
   const list = studios
     .map(
       (s, i) =>
-        `  [${i + 1}] ${s.placeName} (port ${s.port}${s.placeId ? `, Place ID: ${s.placeId}` : ""})`
+        "  [" + (i + 1) + "] " + s.placeName +
+        (s.placeId ? " (Place: " + s.placeId + ")" : "")
     )
     .join("\n");
 
-  return `Multiple Roblox Studio instances detected:\n${list}\n\nUse the select_studio tool to pick one before running commands.`;
+  return "Multiple Roblox Studio instances connected:\n" + list + "\n\nUse select_studio to pick one.";
 }
 
-function formatStudioList(studios: StudioInstance[]): string {
-  if (studios.length === 0) return "No active Roblox Studio instances found.";
+function formatStudioList(studios: StudioInfo[]): string {
+  if (studios.length === 0) return "No active Roblox Studio instances connected.";
 
   return studios
     .map(
       (s, i) =>
-        `[${i + 1}] ${s.placeName}\n    ID: ${s.id}\n    Port: ${s.port}${
-          s.placeId ? `\n    Place ID: ${s.placeId}` : ""
-        }${s.gameId ? `\n    Game ID: ${s.gameId}` : ""}`
+        "[" + (i + 1) + "] " + s.placeName +
+        "\n    ID: " + s.studioId +
+        (s.placeId ? "\n    Place ID: " + s.placeId : "") +
+        (s.gameId ? "\n    Game ID: " + s.gameId : "")
     )
     .join("\n\n");
 }
@@ -66,12 +81,12 @@ const server = new McpServer({
 
 server.tool(
   "list_studios",
-  "Scan for and list all running Roblox Studio instances",
+  "List all connected Roblox Studio instances",
   {},
   async () => {
-    const studios = await scanner.scan();
+    const studios = registry.getActiveStudios();
     const current = selectedStudioId
-      ? `Currently selected: ${selectedStudioId}\n\n`
+      ? "Currently selected: " + selectedStudioId + "\n\n"
       : "No studio selected yet.\n\n";
 
     return {
@@ -87,14 +102,13 @@ server.tool(
   "Select which Roblox Studio instance to send commands to",
   {
     id: z
-
       .string()
       .describe(
         "The studio ID to select (from list_studios), or a 1-based index number"
       ),
   },
   async ({ id }) => {
-    const studios = await scanner.scan();
+    const studios = registry.getActiveStudios();
 
     if (studios.length === 0) {
       return {
@@ -107,13 +121,13 @@ server.tool(
       };
     }
 
-    let target: StudioInstance | undefined;
+    let target: StudioInfo | undefined;
     const index = parseInt(id, 10);
 
     if (!isNaN(index) && index >= 1 && index <= studios.length) {
       target = studios[index - 1];
     } else {
-      target = studios.find((s) => s.id === id);
+      target = studios.find((s) => s.studioId === id);
     }
 
     if (!target) {
@@ -121,20 +135,20 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Studio "${id}" not found. Available:\n${formatStudioList(studios)}`,
+            text: "Studio not found. Available:\n" + formatStudioList(studios),
           },
         ],
       };
     }
 
-    selectedStudioId = target.id;
-    activeClient = new StudioClient(target);
+    selectedStudioId = target.studioId;
+    activeClient = new StudioClient(target.studioId, bridge);
 
     return {
       content: [
         {
           type: "text",
-          text: `Selected: ${target.placeName} (port ${target.port})`,
+          text: "Selected: " + target.placeName + " (" + target.studioId.slice(0, 8) + "...)",
         },
       ],
     };
@@ -150,21 +164,28 @@ server.tool(
     code: z.string().describe("Luau code to execute in Studio"),
   },
   async ({ code }) => {
-    const client = await getClient();
+    const client = getClient();
     if (typeof client === "string") {
       return { content: [{ type: "text", text: client }] };
     }
 
     const res = await client.execute(code);
+    let text: string;
+    if (res.success) {
+      const data = res.data as any;
+      if (data && typeof data === "object") {
+        const parts: string[] = [];
+        if (data.output) parts.push(data.output);
+        if (data.returnValue) parts.push("Return: " + data.returnValue);
+        text = parts.length > 0 ? parts.join("\n") : "Executed successfully.";
+      } else {
+        text = String(data ?? "Executed successfully.");
+      }
+    } else {
+      text = "Error: " + res.error;
+    }
     return {
-      content: [
-        {
-          type: "text",
-          text: res.success
-            ? String(res.data ?? "Executed successfully.")
-            : `Error: ${res.error}`,
-        },
-      ],
+      content: [{ type: "text", text }],
     };
   }
 );
@@ -176,12 +197,11 @@ server.tool(
   "Get children of an instance in the selected Studio",
   {
     path: z
-
       .string()
       .describe("Instance path, e.g. game.Workspace or game.ServerScriptService"),
   },
   async ({ path }) => {
-    const client = await getClient();
+    const client = getClient();
     if (typeof client === "string") {
       return { content: [{ type: "text", text: client }] };
     }
@@ -193,7 +213,7 @@ server.tool(
           type: "text",
           text: res.success
             ? JSON.stringify(res.data, null, 2)
-            : `Error: ${res.error}`,
+            : "Error: " + res.error,
         },
       ],
     };
@@ -205,12 +225,11 @@ server.tool(
   "Get properties of an instance in the selected Studio",
   {
     path: z
-
       .string()
       .describe("Instance path, e.g. game.Workspace.Part"),
   },
   async ({ path }) => {
-    const client = await getClient();
+    const client = getClient();
     if (typeof client === "string") {
       return { content: [{ type: "text", text: client }] };
     }
@@ -222,7 +241,7 @@ server.tool(
           type: "text",
           text: res.success
             ? JSON.stringify(res.data, null, 2)
-            : `Error: ${res.error}`,
+            : "Error: " + res.error,
         },
       ],
     };
@@ -236,12 +255,11 @@ server.tool(
   "Get the source code of a script in the selected Studio",
   {
     path: z
-
       .string()
       .describe("Script path, e.g. game.ServerScriptService.Main"),
   },
   async ({ path }) => {
-    const client = await getClient();
+    const client = getClient();
     if (typeof client === "string") {
       return { content: [{ type: "text", text: client }] };
     }
@@ -251,7 +269,7 @@ server.tool(
       content: [
         {
           type: "text",
-          text: res.success ? String(res.data) : `Error: ${res.error}`,
+          text: res.success ? String(res.data) : "Error: " + res.error,
         },
       ],
     };
@@ -266,7 +284,7 @@ server.tool(
     source: z.string().describe("New Luau source code for the script"),
   },
   async ({ path, source }) => {
-    const client = await getClient();
+    const client = getClient();
     if (typeof client === "string") {
       return { content: [{ type: "text", text: client }] };
     }
@@ -278,7 +296,7 @@ server.tool(
           type: "text",
           text: res.success
             ? "Script source updated."
-            : `Error: ${res.error}`,
+            : "Error: " + res.error,
         },
       ],
     };
@@ -300,7 +318,7 @@ server.tool(
       .describe("Optional properties to set on creation"),
   },
   async ({ className, parent, name, properties }) => {
-    const client = await getClient();
+    const client = getClient();
     if (typeof client === "string") {
       return { content: [{ type: "text", text: client }] };
     }
@@ -311,8 +329,8 @@ server.tool(
         {
           type: "text",
           text: res.success
-            ? `Created ${className}${name ? ` "${name}"` : ""} in ${parent}`
-            : `Error: ${res.error}`,
+            ? "Created " + className + (name ? " \"" + name + "\"" : "") + " in " + parent
+            : "Error: " + res.error,
         },
       ],
     };
@@ -326,7 +344,7 @@ server.tool(
     path: z.string().describe("Instance path to delete"),
   },
   async ({ path }) => {
-    const client = await getClient();
+    const client = getClient();
     if (typeof client === "string") {
       return { content: [{ type: "text", text: client }] };
     }
@@ -336,7 +354,7 @@ server.tool(
       content: [
         {
           type: "text",
-          text: res.success ? `Deleted ${path}` : `Error: ${res.error}`,
+          text: res.success ? "Deleted " + path : "Error: " + res.error,
         },
       ],
     };
@@ -352,7 +370,7 @@ server.tool(
     value: z.unknown().describe("Value to set"),
   },
   async ({ path, property, value }) => {
-    const client = await getClient();
+    const client = getClient();
     if (typeof client === "string") {
       return { content: [{ type: "text", text: client }] };
     }
@@ -363,8 +381,8 @@ server.tool(
         {
           type: "text",
           text: res.success
-            ? `Set ${property} on ${path}`
-            : `Error: ${res.error}`,
+            ? "Set " + property + " on " + path
+            : "Error: " + res.error,
         },
       ],
     };
@@ -382,7 +400,7 @@ server.tool(
       .describe("Optional: filter by class name, e.g. Part, Script"),
   },
   async ({ query, className }) => {
-    const client = await getClient();
+    const client = getClient();
     if (typeof client === "string") {
       return { content: [{ type: "text", text: client }] };
     }
@@ -394,7 +412,7 @@ server.tool(
           type: "text",
           text: res.success
             ? JSON.stringify(res.data, null, 2)
-            : `Error: ${res.error}`,
+            : "Error: " + res.error,
         },
       ],
     };
@@ -404,6 +422,11 @@ server.tool(
 // --- Start Server ---
 
 async function main() {
+  // Start the HTTP server for plugin communication
+  const { port } = await startHttpServer(bridge, registry);
+  console.error("[VZN MCP] Multi-studio MCP server ready (HTTP on port " + port + ")");
+
+  // Start the MCP stdio transport for Claude
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
