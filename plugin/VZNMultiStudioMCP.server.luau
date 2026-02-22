@@ -13,7 +13,7 @@
     ||                                                                      ||
     ||  MODULE NAME     : VZNMultiStudioMCP                                ||
     ||  AUTHOR          : VZNZach                                          ||
-    ||  VERSION         : 1.4.0                                            ||
+    ||  VERSION         : 1.5.0                                            ||
     ||  LAST UPDATED    : 2026-02-22                                       ||
     ||                                                                      ||
     ||====================================================================||
@@ -43,7 +43,8 @@
     ||      * Clean disconnect on plugin unload                            ||
     ||      * DockWidget UI showing connection status                      ||
     ||      * Enable/Disable toggle with clean connect/disconnect          ||
-    ||      * Manual port selection for multi-session routing                ||
+    ||      * Manual port selection for multi-session routing              ||
+    ||      * Edit-mode guard: pauses during playtesting                   ||
     ||                                                                      ||
     ||  COMMAND TYPES:                                                      ||
     ||      * execute          -- Run Luau code via loadstring             ||
@@ -64,6 +65,7 @@
 -- =============================================================================
 
 local HttpService         = game:GetService(`HttpService`)
+local RunService          = game:GetService(`RunService`)
 local ScriptEditorService = game:GetService(`ScriptEditorService`)
 local Selection           = game:GetService(`Selection`)
 
@@ -99,7 +101,7 @@ type SearchResult = {
 	Path: string,
 }
 
-type ConnectionState = "Disconnected" | "Discovering" | "Connected"
+type ConnectionState = "Disconnected" | "Discovering" | "Connected" | "Paused"
 
 -- =============================================================================
 --                              CONSTANTS
@@ -145,7 +147,7 @@ local _toggleButton: TextButton?       = nil
 local _portInputBox: TextBox?           = nil
 local _connectButton: TextButton?       = nil
 
-local PLUGIN_VERSION = "1.4.0"
+local PLUGIN_VERSION = "1.5.0"
 
 -- =============================================================================
 --                            PRIVATE HELPERS
@@ -733,6 +735,9 @@ local function updateUI(): ()
 	if not _isEnabled then
 		_statusLabel.Text       = `Status: Disabled`
 		_statusLabel.TextColor3 = Color3.fromRGB(140, 140, 140)
+	elseif _state == "Paused" then
+		_statusLabel.Text       = `Status: Paused (Playing)`
+		_statusLabel.TextColor3 = Color3.fromRGB(255, 170, 50)
 	else
 		_statusLabel.Text       = `Status: {_state}`
 		_statusLabel.TextColor3 = if _state == "Connected"
@@ -769,12 +774,12 @@ end
 local function discoverServer(): number?
 	local backoff = BACKOFF_INITIAL
 
-	while not _isUnloading and _isEnabled do
+	while not _isUnloading and _isEnabled and RunService:IsEdit() do
 		_state = "Discovering"
 		updateUI()
 
 		if _targetPort then
-			if _isUnloading or not _isEnabled then return nil end
+			if _isUnloading or not _isEnabled or not RunService:IsEdit() then return nil end
 
 			local url    = `{BASE_URL_PREFIX}{_targetPort}/health`
 			local ok, body = httpRequest(`GET`, url, nil)
@@ -787,7 +792,7 @@ local function discoverServer(): number?
 			end
 		else
 			for port = PORT_MIN, PORT_MAX do
-				if _isUnloading or not _isEnabled then return nil end
+				if _isUnloading or not _isEnabled or not RunService:IsEdit() then return nil end
 
 				local url    = `{BASE_URL_PREFIX}{port}/health`
 				local ok, body = httpRequest(`GET`, url, nil)
@@ -801,7 +806,7 @@ local function discoverServer(): number?
 			end
 		end
 
-		if _isUnloading or not _isEnabled then return nil end
+		if _isUnloading or not _isEnabled or not RunService:IsEdit() then return nil end
 
 		task.wait(backoff)
 		backoff = math.min(backoff * 2, BACKOFF_MAX)
@@ -891,7 +896,7 @@ local function pollLoop(): ()
 	_isPolling           = true
 	_consecutiveFailures = 0
 
-	while _isPolling and not _isUnloading and _isEnabled do
+	while _isPolling and not _isUnloading and _isEnabled and RunService:IsEdit() do
 		local ok, body = httpRequest(`GET`, `{_baseUrl}/poll?studioId={_studioId}`, nil)
 
 		if not ok then
@@ -949,6 +954,28 @@ end
 -- Main connection lifecycle: discover -> register -> poll -> reconnect
 local function connectionLoop(): ()
 	while not _isUnloading and _isEnabled do
+		if not RunService:IsEdit() then
+			if _baseUrl then
+				disconnectFromServer()
+				_serverPort = nil
+				_baseUrl    = nil
+			end
+
+			_isPolling = false
+			_state     = "Paused"
+			updateUI()
+
+			while not RunService:IsEdit() and not _isUnloading do
+				task.wait(1)
+			end
+
+			if _isUnloading then return end
+			if not _isEnabled then continue end
+
+			_state = "Disconnected"
+			updateUI()
+		end
+
 		local port = discoverServer()
 
 		if not port then
