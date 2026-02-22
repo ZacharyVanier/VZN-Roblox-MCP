@@ -45,7 +45,7 @@ export function startHttpServer(
         reject(new Error("Port " + fixedPort + " is already in use"));
         return;
       }
-      if (port > HTTP_PORT_END) {
+      if (fixedPort == null && port > HTTP_PORT_END) {
         reject(new Error("No available port in range " + HTTP_PORT_START + "-" + HTTP_PORT_END));
         return;
       }

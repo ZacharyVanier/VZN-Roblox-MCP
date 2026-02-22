@@ -18,6 +18,8 @@ const bridge = new BridgeService();
 const registry = new StudioRegistry();
 let selectedStudioId: string | null = null;
 let activeClient: StudioClient | null = null;
+let serverPort: number | null = null;
+let httpServer: import("http").Server | null = null;
 
 /** Resolve the active studio, or return an error message. */
 function getClient(): StudioClient | string {
@@ -85,15 +87,73 @@ server.tool(
   {},
   async () => {
     const studios = registry.getActiveStudios();
+    const portInfo = "Server running on port: " + (serverPort ?? "unknown") + "\n";
     const current = selectedStudioId
-      ? "Currently selected: " + selectedStudioId + "\n\n"
-      : "No studio selected yet.\n\n";
+      ? portInfo + "Currently selected: " + selectedStudioId + "\n\n"
+      : portInfo + "No studio selected yet.\n\n";
 
     return {
       content: [
         { type: "text", text: current + formatStudioList(studios) },
       ],
     };
+  }
+);
+
+server.tool(
+  "set_port",
+  "Change which port the MCP server listens on. Tell the user the new port so they can type it in the Studio plugin widget.",
+  {
+    port: z.number().min(1).max(65535).describe("Port number to switch to"),
+  },
+  async ({ port }) => {
+    if (port === serverPort) {
+      return { content: [{ type: "text", text: "Already running on port " + port }] };
+    }
+
+    // Close old server and wait for port to be released
+    if (httpServer) {
+      httpServer.closeAllConnections();
+      await new Promise<void>((resolve) => {
+        httpServer!.close(() => resolve());
+      });
+      httpServer = null;
+      // Brief delay to let the OS release the port
+      await new Promise((r) => setTimeout(r, 300));
+    }
+
+    // Clear connections since studios will need to reconnect
+    selectedStudioId = null;
+    activeClient = null;
+
+    try {
+      const result = await startHttpServer(bridge, registry, port);
+      httpServer = result.server;
+      serverPort = result.port;
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Server moved to port " + port + ". Tell the user to type " + port + " in the Studio plugin and click Connect.",
+          },
+        ],
+      };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error("[VZN MCP] set_port failed:", errMsg);
+      // Failed — try to restart on any available port
+      const fallback = await startHttpServer(bridge, registry);
+      httpServer = fallback.server;
+      serverPort = fallback.port;
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Failed to switch to port " + port + ": " + errMsg + ". Fell back to port " + serverPort + ".",
+          },
+        ],
+      };
+    }
   }
 );
 
@@ -436,8 +496,10 @@ async function main() {
   const fixedPort = parsePort();
 
   // Start the HTTP server for plugin communication
-  const { port } = await startHttpServer(bridge, registry, fixedPort);
-  console.error("[VZN MCP] Multi-studio MCP server ready (HTTP on port " + port + ")");
+  const result = await startHttpServer(bridge, registry, fixedPort);
+  httpServer = result.server;
+  serverPort = result.port;
+  console.error("[VZN MCP] Multi-studio MCP server ready (HTTP on port " + serverPort + ")");
 
   // Start the MCP stdio transport for Claude
   const transport = new StdioServerTransport();
