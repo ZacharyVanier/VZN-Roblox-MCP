@@ -1,0 +1,6 @@
+{
+  "name": "McpPluginVZN",
+  "tree": {
+    "$path": "VZNMultiStudioMCP.server.luau"
+  }
+}

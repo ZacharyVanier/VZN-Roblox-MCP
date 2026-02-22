@@ -36,10 +36,15 @@ function sendJson(res: http.ServerResponse, status: number, data: unknown): void
  */
 export function startHttpServer(
   bridge: BridgeService,
-  registry: StudioRegistry
+  registry: StudioRegistry,
+  fixedPort?: number
 ): Promise<{ server: http.Server; port: number }> {
   return new Promise((resolve, reject) => {
     function tryPort(port: number): void {
+      if (fixedPort != null && port !== fixedPort) {
+        reject(new Error("Port " + fixedPort + " is already in use"));
+        return;
+      }
       if (port > HTTP_PORT_END) {
         reject(new Error("No available port in range " + HTTP_PORT_START + "-" + HTTP_PORT_END));
         return;
@@ -160,6 +165,6 @@ export function startHttpServer(
       });
     }
 
-    tryPort(HTTP_PORT_START);
+    tryPort(fixedPort != null ? fixedPort : HTTP_PORT_START);
   });
 }

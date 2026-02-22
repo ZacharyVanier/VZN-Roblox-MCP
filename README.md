@@ -13,6 +13,7 @@ Let Claude (AI) control your Roblox Studio directly. Run code, create parts, edi
 - Get properties and children of any instance
 - Works with multiple Studio windows open at once
 - Toggle the connection on/off from inside Studio
+- Manual port selection -- point each Studio to a specific Claude session
 
 ## How It Works
 
@@ -137,6 +138,7 @@ Once installed, the plugin adds a small panel in Studio (you can find it under t
 - **Place** -- The name of your place
 - **Version** -- Plugin version number
 - **Enable/Disable button** -- Click this to turn the connection on or off without removing the plugin
+- **Port input + Connect button** -- Type a specific port number to connect to a particular Claude session, or leave blank for auto-discover
 
 ## What Claude Can Do
 
@@ -153,6 +155,38 @@ Once installed, the plugin adds a small panel in Studio (you can find it under t
 | `delete_instance` | Deletes an object |
 | `set_property` | Changes a property on an object |
 | `search` | Searches for objects by name or class |
+
+## Using Multiple Claude Sessions
+
+If you have two Claude sessions open and want each one to control a different Studio, you can use the `--port` flag:
+
+**Session A** (uses port 3002 by default -- no flag needed):
+```json
+{
+  "mcpServers": {
+    "vzn-roblox-mcp": {
+      "command": "node",
+      "args": ["/path/to/VZN-Roblox-MCP/dist/index.js"]
+    }
+  }
+}
+```
+
+**Session B** (uses port 3005):
+```json
+{
+  "mcpServers": {
+    "vzn-roblox-mcp": {
+      "command": "node",
+      "args": ["/path/to/VZN-Roblox-MCP/dist/index.js", "--port", "3005"]
+    }
+  }
+}
+```
+
+Then in each Studio window, open the VZN MCP widget, type the port number in the input field, and click **Connect**:
+- Studio A: type `3002` (or leave blank for auto) -> connects to Session A
+- Studio B: type `3005` -> connects to Session B
 
 ## Requirements
 

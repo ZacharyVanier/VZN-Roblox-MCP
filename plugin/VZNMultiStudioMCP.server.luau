@@ -1,9 +1,4 @@
-<roblox version="4">
-  <Item class="Script" referent="0">
-    <Properties>
-      <string name="Name">McpPluginVZN</string>
-      <token name="RunContext">0</token>
-      <string name="Source"><![CDATA[--[[
+--[[
     ======================================================================
     ||                                                                      ||
     ||  ##   ## ###### ##   ## ###### #####  ####  #### ##  ##              ||
@@ -1231,7 +1226,3 @@ plugin.Unloading:Connect(function()
 end)
 
 -- =============================================================================
-]]></string>
-    </Properties>
-  </Item>
-</roblox>

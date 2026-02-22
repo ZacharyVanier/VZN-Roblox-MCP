@@ -421,9 +421,22 @@ server.tool(
 
 // --- Start Server ---
 
+function parsePort(): number | undefined {
+  const idx = process.argv.indexOf("--port");
+  if (idx === -1) return undefined;
+  const val = parseInt(process.argv[idx + 1], 10);
+  if (isNaN(val) || val < 1 || val > 65535) {
+    console.error("[VZN MCP] Invalid --port value, using auto-discovery");
+    return undefined;
+  }
+  return val;
+}
+
 async function main() {
+  const fixedPort = parsePort();
+
   // Start the HTTP server for plugin communication
-  const { port } = await startHttpServer(bridge, registry);
+  const { port } = await startHttpServer(bridge, registry, fixedPort);
   console.error("[VZN MCP] Multi-studio MCP server ready (HTTP on port " + port + ")");
 
   // Start the MCP stdio transport for Claude
