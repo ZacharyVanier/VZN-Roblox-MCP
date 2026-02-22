@@ -87,18 +87,12 @@ You can also find the plugins folder from Studio: **Plugins tab -> Plugins Folde
 > rojo build -o McpPluginVZN.rbxmx
 > ```
 
-### 3. Add to Claude Code
+### 3. Add to Claude
 
-Run this command (replace the path with where you cloned the repo):
+#### Claude Code (CLI)
 
-**macOS:**
 ```bash
-claude mcp add --transport stdio vzn-roblox-mcp -- node ~/Desktop/VZN-Roblox-MCP/dist/index.js
-```
-
-**Windows:**
-```bash
-claude mcp add --transport stdio vzn-roblox-mcp -- node C:/Users/YourName/Desktop/VZN-Roblox-MCP/dist/index.js
+claude mcp add --transport stdio vzn-roblox-mcp -- node /path/to/VZN-Roblox-MCP/dist/index.js
 ```
 
 Or manually add to `~/.claude.json`:
@@ -113,6 +107,30 @@ Or manually add to `~/.claude.json`:
   }
 }
 ```
+
+#### Claude Desktop (App)
+
+Edit the Claude Desktop config file:
+
+| OS      | Config File                                                    |
+|---------|----------------------------------------------------------------|
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json`                  |
+| macOS   | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+
+Add this to the file (replace the path with where you cloned the repo):
+
+```json
+{
+  "mcpServers": {
+    "vzn-roblox-mcp": {
+      "command": "node",
+      "args": ["/full/path/to/VZN-Roblox-MCP/dist/index.js"]
+    }
+  }
+}
+```
+
+If the file already has other MCP servers, just add `"vzn-roblox-mcp": { ... }` inside the existing `mcpServers` object. Then restart Claude Desktop.
 
 ### 4. Enable HTTP Requests in Studio
 
