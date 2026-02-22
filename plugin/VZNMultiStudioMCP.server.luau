@@ -13,7 +13,7 @@
     ||                                                                      ||
     ||  MODULE NAME     : VZNMultiStudioMCP                                ||
     ||  AUTHOR          : VZNZach                                          ||
-    ||  VERSION         : 1.2.0                                            ||
+    ||  VERSION         : 1.3.0                                            ||
     ||  LAST UPDATED    : 2026-02-21                                       ||
     ||                                                                      ||
     ||====================================================================||
@@ -42,6 +42,7 @@
     ||      * Auto-reconnect after 3 consecutive poll failures             ||
     ||      * Clean disconnect on plugin unload                            ||
     ||      * DockWidget UI showing connection status                      ||
+    ||      * Enable/Disable toggle with clean connect/disconnect          ||
     ||                                                                      ||
     ||  COMMAND TYPES:                                                      ||
     ||      * execute          -- Run Luau code via loadstring             ||
@@ -128,6 +129,7 @@ local _isPolling: boolean          = false
 local _pollThread: thread?         = nil
 local _consecutiveFailures: number = 0
 local _isUnloading: boolean        = false
+local _isEnabled: boolean           = true
 
 local _toolbar: PluginToolbar?         = nil
 local _button: PluginToolbarButton?    = nil
@@ -137,8 +139,9 @@ local _portLabel: TextLabel?           = nil
 local _idLabel: TextLabel?             = nil
 local _placeLabel: TextLabel?          = nil
 local _versionLabel: TextLabel?        = nil
+local _toggleButton: TextButton?       = nil
 
-local PLUGIN_VERSION = "1.2.0"
+local PLUGIN_VERSION = "1.3.0"
 
 -- =============================================================================
 --                            PRIVATE HELPERS
@@ -723,12 +726,17 @@ local function updateUI(): ()
 		end
 	end)
 
-	_statusLabel.Text       = `Status: {_state}`
-	_statusLabel.TextColor3 = if _state == "Connected"
-		then Color3.fromRGB(85, 255, 85)
-		elseif _state == "Discovering"
-		then Color3.fromRGB(255, 200, 60)
-		else Color3.fromRGB(255, 85, 85)
+	if not _isEnabled then
+		_statusLabel.Text       = `Status: Disabled`
+		_statusLabel.TextColor3 = Color3.fromRGB(140, 140, 140)
+	else
+		_statusLabel.Text       = `Status: {_state}`
+		_statusLabel.TextColor3 = if _state == "Connected"
+			then Color3.fromRGB(85, 255, 85)
+			elseif _state == "Discovering"
+			then Color3.fromRGB(255, 200, 60)
+			else Color3.fromRGB(255, 85, 85)
+	end
 
 	if _portLabel then
 		_portLabel.Text = `Port: {portText}`
@@ -741,6 +749,11 @@ local function updateUI(): ()
 	if _placeLabel then
 		_placeLabel.Text = `Place: {placeText}`
 	end
+
+	if _toggleButton then
+		_toggleButton.Text            = if _isEnabled then `Enabled` else `Disabled`
+		_toggleButton.BackgroundColor3 = if _isEnabled then Color3.fromRGB(45, 140, 60) else Color3.fromRGB(160, 50, 50)
+	end
 end
 
 --- discoverServer(): number?
@@ -748,12 +761,12 @@ end
 local function discoverServer(): number?
 	local backoff = BACKOFF_INITIAL
 
-	while not _isUnloading do
+	while not _isUnloading and _isEnabled do
 		_state = "Discovering"
 		updateUI()
 
 		for port = PORT_MIN, PORT_MAX do
-			if _isUnloading then return nil end
+			if _isUnloading or not _isEnabled then return nil end
 
 			local url    = `{BASE_URL_PREFIX}{port}/health`
 			local ok, body = httpRequest(`GET`, url, nil)
@@ -766,7 +779,7 @@ local function discoverServer(): number?
 			end
 		end
 
-		if _isUnloading then return nil end
+		if _isUnloading or not _isEnabled then return nil end
 
 		task.wait(backoff)
 		backoff = math.min(backoff * 2, BACKOFF_MAX)
@@ -856,7 +869,7 @@ local function pollLoop(): ()
 	_isPolling           = true
 	_consecutiveFailures = 0
 
-	while _isPolling and not _isUnloading do
+	while _isPolling and not _isUnloading and _isEnabled do
 		local ok, body = httpRequest(`GET`, `{_baseUrl}/poll?studioId={_studioId}`, nil)
 
 		if not ok then
@@ -913,11 +926,11 @@ end
 --- connectionLoop(): ()
 -- Main connection lifecycle: discover -> register -> poll -> reconnect
 local function connectionLoop(): ()
-	while not _isUnloading do
+	while not _isUnloading and _isEnabled do
 		local port = discoverServer()
 
 		if not port then
-			if _isUnloading then return end
+			if _isUnloading or not _isEnabled then return end
 			task.wait(BACKOFF_INITIAL)
 			continue
 		end
@@ -954,6 +967,34 @@ end
 -- =============================================================================
 --                             PLUGIN UI
 -- =============================================================================
+
+--- toggleEnabled(): ()
+-- Toggles the plugin between enabled and disabled states
+local function toggleEnabled(): ()
+	if _isEnabled then
+		_isEnabled  = false
+		_isPolling  = false
+
+		disconnectFromServer()
+
+		if _pollThread then
+			pcall(task.cancel, _pollThread)
+			_pollThread = nil
+		end
+
+		_serverPort = nil
+		_baseUrl    = nil
+		_state      = "Disconnected"
+
+		updateUI()
+	else
+		_isEnabled = true
+
+		updateUI()
+
+		_pollThread = task.spawn(connectionLoop)
+	end
+end
 
 --- createWidget(): ()
 -- Creates the toolbar, button, and dock widget UI
@@ -1029,6 +1070,24 @@ local function createWidget(): ()
 	_versionLabel = createLabel(`Version: {PLUGIN_VERSION}`, 5)
 	_versionLabel.TextColor3 = Color3.fromRGB(140, 140, 140)
 	_versionLabel.TextSize = 12
+
+	_toggleButton                       = Instance.new(`TextButton`)
+	_toggleButton.Size                  = UDim2.new(1, 0, 0, 28)
+	_toggleButton.BackgroundColor3      = Color3.fromRGB(45, 140, 60)
+	_toggleButton.BorderSizePixel       = 0
+	_toggleButton.TextColor3            = Color3.fromRGB(255, 255, 255)
+	_toggleButton.Font                  = Enum.Font.RobotoMono
+	_toggleButton.TextSize              = 14
+	_toggleButton.Text                  = `Enabled`
+	_toggleButton.LayoutOrder           = 6
+	_toggleButton.AutoButtonColor       = true
+	_toggleButton.Parent                = background
+
+	local toggleCorner        = Instance.new(`UICorner`)
+	toggleCorner.CornerRadius = UDim.new(0, 4)
+	toggleCorner.Parent       = _toggleButton
+
+	_toggleButton.MouseButton1Click:Connect(toggleEnabled)
 
 	_button.Click:Connect(function()
 		_widget.Enabled = not _widget.Enabled
