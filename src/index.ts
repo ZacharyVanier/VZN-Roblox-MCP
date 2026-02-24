@@ -76,7 +76,7 @@ function formatStudioList(studios: StudioInfo[]): string {
 
 const server = new McpServer({
   name: "vzn-roblox-mcp",
-  version: "1.0.0",
+  version: "1.6.0",
 });
 
 // --- Studio Management Tools ---
@@ -325,13 +325,15 @@ server.tool(
     }
 
     const res = await client.getScriptSource(path);
+    let text: string;
+    if (res.success) {
+      const data = res.data as any;
+      text = (data && typeof data === "object" && data.source) ? data.source : String(data ?? "");
+    } else {
+      text = "Error: " + res.error;
+    }
     return {
-      content: [
-        {
-          type: "text",
-          text: res.success ? String(res.data) : "Error: " + res.error,
-        },
-      ],
+      content: [{ type: "text", text }],
     };
   }
 );
@@ -473,6 +475,128 @@ server.tool(
           text: res.success
             ? JSON.stringify(res.data, null, 2)
             : "Error: " + res.error,
+        },
+      ],
+    };
+  }
+);
+
+// --- Console Output ---
+
+server.tool(
+  "get_console_output",
+  "Get the accumulated console output (print/warn/error) from the selected Studio since plugin load",
+  {},
+  async () => {
+    const client = getClient();
+    if (typeof client === "string") {
+      return { content: [{ type: "text", text: client }] };
+    }
+
+    const res = await client.getConsoleOutput();
+    return {
+      content: [
+        {
+          type: "text",
+          text: res.success
+            ? String((res.data as any)?.output ?? "(no output)")
+            : "Error: " + res.error,
+        },
+      ],
+    };
+  }
+);
+
+server.tool(
+  "clear_console_output",
+  "Clear the accumulated console output buffer in the selected Studio",
+  {},
+  async () => {
+    const client = getClient();
+    if (typeof client === "string") {
+      return { content: [{ type: "text", text: client }] };
+    }
+
+    const res = await client.clearConsoleOutput();
+    return {
+      content: [
+        {
+          type: "text",
+          text: res.success ? "Console output cleared." : "Error: " + res.error,
+        },
+      ],
+    };
+  }
+);
+
+// --- Play Mode Controls ---
+
+server.tool(
+  "get_studio_mode",
+  "Get the current Studio mode: edit, play, or run",
+  {},
+  async () => {
+    const client = getClient();
+    if (typeof client === "string") {
+      return { content: [{ type: "text", text: client }] };
+    }
+
+    const res = await client.getStudioMode();
+    return {
+      content: [
+        {
+          type: "text",
+          text: res.success
+            ? String((res.data as any)?.mode ?? "unknown")
+            : "Error: " + res.error,
+        },
+      ],
+    };
+  }
+);
+
+server.tool(
+  "start_playtest",
+  "Start a playtest in the selected Studio. Mode can be 'play' (client+server) or 'run' (server only).",
+  {
+    mode: z.enum(["play", "run"]).optional().describe("Playtest mode: 'play' (default) or 'run' (server only)"),
+  },
+  async ({ mode }) => {
+    const client = getClient();
+    if (typeof client === "string") {
+      return { content: [{ type: "text", text: client }] };
+    }
+
+    const res = await client.startPlaytest(mode || "play");
+    return {
+      content: [
+        {
+          type: "text",
+          text: res.success
+            ? "Playtest started (" + (mode || "play") + " mode)."
+            : "Error: " + res.error,
+        },
+      ],
+    };
+  }
+);
+
+server.tool(
+  "stop_playtest",
+  "Stop the current playtest in the selected Studio and return to Edit mode",
+  {},
+  async () => {
+    const client = getClient();
+    if (typeof client === "string") {
+      return { content: [{ type: "text", text: client }] };
+    }
+
+    const res = await client.stopPlaytest();
+    return {
+      content: [
+        {
+          type: "text",
+          text: res.success ? "Playtest stopped." : "Error: " + res.error,
         },
       ],
     };

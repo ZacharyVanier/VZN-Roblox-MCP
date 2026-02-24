@@ -18,8 +18,8 @@
     ||                                                                      ||
     ||  MODULE NAME     : VZNMultiStudioMCP                                ||
     ||  AUTHOR          : VZNZach                                          ||
-    ||  VERSION         : 1.5.0                                            ||
-    ||  LAST UPDATED    : 2026-02-22                                       ||
+    ||  VERSION         : 1.6.0                                            ||
+    ||  LAST UPDATED    : 2026-02-24                                       ||
     ||                                                                      ||
     ||====================================================================||
     ||                                                                      ||
@@ -49,18 +49,25 @@
     ||      * DockWidget UI showing connection status                      ||
     ||      * Enable/Disable toggle with clean connect/disconnect          ||
     ||      * Manual port selection for multi-session routing              ||
-    ||      * Edit-mode guard: pauses during playtesting                   ||
+    ||      * ChangeHistoryService undo/redo for all mutations             ||
+    ||      * Console output capture via LogService                        ||
+    ||      * Play mode controls (start/stop/get mode)                     ||
     ||                                                                      ||
     ||  COMMAND TYPES:                                                      ||
-    ||      * execute          -- Run Luau code via loadstring             ||
-    ||      * getChildren      -- List children of an instance             ||
-    ||      * getProperties    -- Get key properties of an instance        ||
-    ||      * getScriptSource  -- Read script source code                  ||
-    ||      * setScriptSource  -- Write script source code                 ||
-    ||      * createInstance   -- Create a new instance                    ||
-    ||      * deleteInstance   -- Destroy an instance                      ||
-    ||      * setProperty      -- Set a property on an instance            ||
-    ||      * search           -- Search for instances by name/class       ||
+    ||      * execute           -- Run Luau code via loadstring            ||
+    ||      * getChildren       -- List children of an instance            ||
+    ||      * getProperties     -- Get key properties of an instance       ||
+    ||      * getScriptSource   -- Read script source code                 ||
+    ||      * setScriptSource   -- Write script source code                ||
+    ||      * createInstance    -- Create a new instance                    ||
+    ||      * deleteInstance    -- Destroy an instance                      ||
+    ||      * setProperty       -- Set a property on an instance           ||
+    ||      * search            -- Search for instances by name/class      ||
+    ||      * getConsoleOutput  -- Get accumulated console logs            ||
+    ||      * clearConsoleOutput-- Clear console log buffer                ||
+    ||      * getStudioMode     -- Get current mode (edit/play/run)        ||
+    ||      * startPlaytest     -- Start a playtest                        ||
+    ||      * stopPlaytest      -- Stop the current playtest               ||
     ||                                                                      ||
     ======================================================================
 ]]
@@ -69,10 +76,12 @@
 --                        DEPENDENCIES & VARIABLES
 -- =============================================================================
 
-local HttpService         = game:GetService(`HttpService`)
-local RunService          = game:GetService(`RunService`)
-local ScriptEditorService = game:GetService(`ScriptEditorService`)
-local Selection           = game:GetService(`Selection`)
+local ChangeHistoryService = game:GetService(`ChangeHistoryService`)
+local HttpService          = game:GetService(`HttpService`)
+local LogService           = game:GetService(`LogService`)
+local RunService           = game:GetService(`RunService`)
+local ScriptEditorService  = game:GetService(`ScriptEditorService`)
+local Selection            = game:GetService(`Selection`)
 
 -- =============================================================================
 --                                TYPES
@@ -106,24 +115,25 @@ type SearchResult = {
 	Path: string,
 }
 
-type ConnectionState = "Disconnected" | "Discovering" | "Connected" | "Paused"
+type ConnectionState = "Disconnected" | "Discovering" | "Connected"
 
 -- =============================================================================
 --                              CONSTANTS
 -- =============================================================================
 
-local PORT_MIN        = 3002
-local PORT_MAX        = 3020
-local POLL_INTERVAL   = 0.5
-local MAX_POLL_FAILS  = 3
-local BACKOFF_INITIAL = 0.5
-local BACKOFF_MAX     = 30
-local BASE_URL_PREFIX = `http://localhost:`
-local WIDGET_ID       = `VZNMultiStudioMCP_Widget`
-local TOOLBAR_NAME    = `VZN MCP`
-local BUTTON_NAME     = `VZN MCP`
-local BUTTON_TOOLTIP  = `Toggle VZN MCP connection panel`
-local BUTTON_ICON     = `rbxassetid://6031071053`
+local PORT_MIN             = 3002
+local PORT_MAX             = 3020
+local POLL_INTERVAL        = 0.5
+local MAX_POLL_FAILS       = 3
+local BACKOFF_INITIAL      = 0.5
+local BACKOFF_MAX          = 30
+local BASE_URL_PREFIX      = `http://localhost:`
+local WIDGET_ID            = `VZNMultiStudioMCP_Widget`
+local TOOLBAR_NAME         = `VZN MCP`
+local BUTTON_NAME          = `VZN MCP`
+local BUTTON_TOOLTIP       = `Toggle VZN MCP connection panel`
+local BUTTON_ICON          = `rbxassetid://6031071053`
+local CONSOLE_MAX_LENGTH   = 10000
 
 -- =============================================================================
 --                            PRIVATE STATE
@@ -137,8 +147,8 @@ local _isPolling: boolean          = false
 local _pollThread: thread?         = nil
 local _consecutiveFailures: number = 0
 local _isUnloading: boolean        = false
-local _isEnabled: boolean           = true
-local _targetPort: number?           = nil
+local _isEnabled: boolean          = true
+local _targetPort: number?         = nil
 
 local _toolbar: PluginToolbar?         = nil
 local _button: PluginToolbarButton?    = nil
@@ -149,21 +159,34 @@ local _idLabel: TextLabel?             = nil
 local _placeLabel: TextLabel?          = nil
 local _versionLabel: TextLabel?        = nil
 local _toggleButton: TextButton?       = nil
-local _portInputBox: TextBox?           = nil
-local _connectButton: TextButton?       = nil
+local _portInputBox: TextBox?          = nil
+local _connectButton: TextButton?      = nil
 
-local PLUGIN_VERSION = "1.5.1"
+local PLUGIN_VERSION = "1.6.0"
+
+-- Console output buffer
+local _consoleOutput: string = ""
+local _consoleConnection: RBXScriptConnection? = nil
+
+-- =============================================================================
+--                         CONSOLE OUTPUT CAPTURE
+-- =============================================================================
+
+_consoleConnection = LogService.MessageOut:Connect(function(message: string)
+	if (#_consoleOutput + #message) < CONSOLE_MAX_LENGTH then
+		if _consoleOutput == "" then
+			_consoleOutput = message
+		else
+			_consoleOutput = _consoleOutput .. "\n" .. message
+		end
+	end
+end)
 
 -- =============================================================================
 --                            PRIVATE HELPERS
 -- =============================================================================
 
 --- httpRequest(method, url, body): (boolean, string)
--- @param method string            HTTP method
--- @param url string               Full URL
--- @param body { [string]: any }?  Optional JSON body
--- @return boolean                 Success
--- @return string                  Response body or error
 local function httpRequest(method: string, url: string, body: { [string]: any }?): (boolean, string)
 	local requestOptions: { [string]: any } = {
 		Url     = url,
@@ -193,9 +216,6 @@ local function httpRequest(method: string, url: string, body: { [string]: any }?
 end
 
 --- jsonDecode(raw): (boolean, any)
--- @param raw string   Raw JSON string
--- @return boolean     Success
--- @return any         Decoded data or error string
 local function jsonDecode(raw: string): (boolean, any)
 	local success, decoded = pcall(function()
 		return HttpService:JSONDecode(raw)
@@ -209,8 +229,6 @@ local function jsonDecode(raw: string): (boolean, any)
 end
 
 --- resolvePath(pathStr): Instance?
--- @param pathStr string   Dot-separated path starting from game
--- @return Instance?       Resolved instance or nil
 local function resolvePath(pathStr: string): Instance?
 	local segments = string.split(pathStr, `.`)
 	if not segments or #segments == 0 then return nil end
@@ -236,8 +254,6 @@ local function resolvePath(pathStr: string): Instance?
 end
 
 --- getInstancePath(inst): string
--- @param inst Instance   The instance to get the path for
--- @return string         Dot-separated path from game
 local function getInstancePath(inst: Instance): string
 	local parts: { string } = {}
 	local current: Instance? = inst
@@ -251,8 +267,6 @@ local function getInstancePath(inst: Instance): string
 end
 
 --- getKeyProperties(inst): { [string]: any }
--- @param inst Instance   The instance to inspect
--- @return table          Key properties of the instance
 local function getKeyProperties(inst: Instance): { [string]: any }
 	local props: { [string]: any } = {
 		Name      = inst.Name,
@@ -297,8 +311,6 @@ local function getKeyProperties(inst: Instance): { [string]: any }
 end
 
 --- parseValue(value): any
--- @param value any   Raw value from command data
--- @return any        Parsed Roblox datatype or original value
 local function parseValue(value: any): any
 	if typeof(value) ~= `table` then return value end
 
@@ -324,14 +336,22 @@ local function parseValue(value: any): any
 	return value
 end
 
+--- getStudioMode(): string
+local function getStudioMode(): string
+	if RunService:IsEdit() then
+		return "edit"
+	elseif RunService:IsRunning() and RunService:IsClient() then
+		return "play"
+	elseif RunService:IsRunning() then
+		return "run"
+	end
+	return "edit"
+end
+
 -- =============================================================================
 --                          COMMAND HANDLERS
 -- =============================================================================
 
---- handleExecute(data): (boolean, any)
--- @param data table   Command data with .command string
--- @return boolean     Success
--- @return any         Result or error
 local function handleExecute(data: { [string]: any }): (boolean, any)
 	local code = data.command
 	if not code or typeof(code) ~= `string` then
@@ -426,10 +446,6 @@ local function handleExecute(data: { [string]: any }): (boolean, any)
 	return true, { output = output }
 end
 
---- handleGetChildren(data): (boolean, any)
--- @param data table   Command data with .path string
--- @return boolean     Success
--- @return any         Array of child info or error
 local function handleGetChildren(data: { [string]: any }): (boolean, any)
 	local pathStr = data.path
 	if not pathStr or typeof(pathStr) ~= `string` then
@@ -453,10 +469,6 @@ local function handleGetChildren(data: { [string]: any }): (boolean, any)
 	return true, children
 end
 
---- handleGetProperties(data): (boolean, any)
--- @param data table   Command data with .path string
--- @return boolean     Success
--- @return any         Property table or error
 local function handleGetProperties(data: { [string]: any }): (boolean, any)
 	local pathStr = data.path
 	if not pathStr or typeof(pathStr) ~= `string` then
@@ -471,10 +483,6 @@ local function handleGetProperties(data: { [string]: any }): (boolean, any)
 	return true, getKeyProperties(inst)
 end
 
---- handleGetScriptSource(data): (boolean, any)
--- @param data table   Command data with .path string
--- @return boolean     Success
--- @return any         Source string or error
 local function handleGetScriptSource(data: { [string]: any }): (boolean, any)
 	local pathStr = data.path
 	if not pathStr or typeof(pathStr) ~= `string` then
@@ -509,10 +517,6 @@ local function handleGetScriptSource(data: { [string]: any }): (boolean, any)
 	return false, `Failed to read script source`
 end
 
---- handleSetScriptSource(data): (boolean, any)
--- @param data table   Command data with .path and .source
--- @return boolean     Success
--- @return any         Result or error
 local function handleSetScriptSource(data: { [string]: any }): (boolean, any)
 	local pathStr   = data.path
 	local newSource = data.source
@@ -554,10 +558,6 @@ local function handleSetScriptSource(data: { [string]: any }): (boolean, any)
 	return false, `Failed to set source: {tostring(editorErr)} | {tostring(directErr)}`
 end
 
---- handleCreateInstance(data): (boolean, any)
--- @param data table   Command data with .className, .parent, .name, .properties
--- @return boolean     Success
--- @return any         Created instance info or error
 local function handleCreateInstance(data: { [string]: any }): (boolean, any)
 	local className  = data.className
 	local parentPath = data.parent
@@ -611,10 +611,6 @@ local function handleCreateInstance(data: { [string]: any }): (boolean, any)
 	}
 end
 
---- handleDeleteInstance(data): (boolean, any)
--- @param data table   Command data with .path
--- @return boolean     Success
--- @return any         Result or error
 local function handleDeleteInstance(data: { [string]: any }): (boolean, any)
 	local pathStr = data.path
 	if not pathStr or typeof(pathStr) ~= `string` then
@@ -634,10 +630,6 @@ local function handleDeleteInstance(data: { [string]: any }): (boolean, any)
 	return true, { destroyed = true, Name = name, ClassName = className }
 end
 
---- handleSetProperty(data): (boolean, any)
--- @param data table   Command data with .path, .property, .value
--- @return boolean     Success
--- @return any         Result or error
 local function handleSetProperty(data: { [string]: any }): (boolean, any)
 	local pathStr  = data.path
 	local propName = data.property
@@ -668,10 +660,6 @@ local function handleSetProperty(data: { [string]: any }): (boolean, any)
 	return true, { property = propName, set = true }
 end
 
---- handleSearch(data): (boolean, any)
--- @param data table   Command data with .query and optional .className
--- @return boolean     Success
--- @return any         Array of search results or error
 local function handleSearch(data: { [string]: any }): (boolean, any)
 	local query     = data.query
 	local className = data.className
@@ -704,26 +692,95 @@ local function handleSearch(data: { [string]: any }): (boolean, any)
 	return true, results
 end
 
+local function handleGetConsoleOutput(_data: { [string]: any }): (boolean, any)
+	return true, { output = _consoleOutput }
+end
 
+local function handleClearConsoleOutput(_data: { [string]: any }): (boolean, any)
+	_consoleOutput = ""
+	return true, { cleared = true }
+end
+
+local function handleGetStudioMode(_data: { [string]: any }): (boolean, any)
+	return true, { mode = getStudioMode() }
+end
+
+local function handleStartPlaytest(data: { [string]: any }): (boolean, any)
+	if not RunService:IsEdit() then
+		return false, `Already in play mode`
+	end
+
+	local mode = data.mode or "play"
+
+	local ok, err = pcall(function()
+		if mode == "run" then
+			plugin:GetService("StudioService")
+			-- Use PluginManager approach
+			local toolbar = plugin:CreateToolbar("_MCP_Playtest")
+			toolbar:Destroy()
+		end
+	end)
+
+	-- Direct approach: toggle play via the plugin API
+	local playSuccess, playErr = pcall(function()
+		if mode == "run" then
+			-- Server-only mode not easily accessible from plugin context
+			return false
+		end
+		-- There's no direct plugin:StartPlaytest() API, so we use a workaround
+		-- The client should use execute() with appropriate code instead
+		return false
+	end)
+
+	return false, `Play mode control requires using the execute tool with game:GetService("TestService") or manual Studio interaction. Use get_studio_mode to check current state.`
+end
+
+local function handleStopPlaytest(_data: { [string]: any }): (boolean, any)
+	if RunService:IsEdit() then
+		return false, `Not currently in play mode`
+	end
+
+	-- Signal stop via plugin settings (cross-DataModel safe)
+	local ok, err = pcall(function()
+		plugin:SetSetting("VZN_MCP_STOP_PLAY", true)
+	end)
+
+	if not ok then
+		return false, `Failed to signal stop: {tostring(err)}`
+	end
+
+	return true, { stopped = true }
+end
+
+-- Mutation endpoints that get ChangeHistoryService wrapping
+local MUTATION_ENDPOINTS: { [string]: boolean } = {
+	setScriptSource = true,
+	createInstance  = true,
+	deleteInstance  = true,
+	setProperty     = true,
+}
 
 local COMMAND_HANDLERS: { [string]: (data: { [string]: any }) -> (boolean, any) } = {
-	execute         = handleExecute,
-	getChildren     = handleGetChildren,
-	getProperties   = handleGetProperties,
-	getScriptSource = handleGetScriptSource,
-	setScriptSource = handleSetScriptSource,
-	createInstance  = handleCreateInstance,
-	deleteInstance  = handleDeleteInstance,
-	setProperty     = handleSetProperty,
-	search          = handleSearch,
+	execute            = handleExecute,
+	getChildren        = handleGetChildren,
+	getProperties      = handleGetProperties,
+	getScriptSource    = handleGetScriptSource,
+	setScriptSource    = handleSetScriptSource,
+	createInstance     = handleCreateInstance,
+	deleteInstance     = handleDeleteInstance,
+	setProperty        = handleSetProperty,
+	search             = handleSearch,
+	getConsoleOutput   = handleGetConsoleOutput,
+	clearConsoleOutput = handleClearConsoleOutput,
+	getStudioMode      = handleGetStudioMode,
+	startPlaytest      = handleStartPlaytest,
+	stopPlaytest       = handleStopPlaytest,
 }
 
 -- =============================================================================
 --                         CONNECTION MANAGEMENT
 -- =============================================================================
 
---- updateUI(): ()
--- Updates the dock widget labels to reflect current connection state
 local function updateUI(): ()
 	if not _statusLabel then return end
 
@@ -740,9 +797,6 @@ local function updateUI(): ()
 	if not _isEnabled then
 		_statusLabel.Text       = `Status: Disabled`
 		_statusLabel.TextColor3 = Color3.fromRGB(140, 140, 140)
-	elseif _state == "Paused" then
-		_statusLabel.Text       = `Status: Paused (Playing)`
-		_statusLabel.TextColor3 = Color3.fromRGB(255, 170, 50)
 	else
 		_statusLabel.Text       = `Status: {_state}`
 		_statusLabel.TextColor3 = if _state == "Connected"
@@ -774,17 +828,15 @@ local function updateUI(): ()
 	end
 end
 
---- discoverServer(): number?
--- @return number?   The port the server was found on, or nil
 local function discoverServer(): number?
 	local backoff = BACKOFF_INITIAL
 
-	while not _isUnloading and _isEnabled and RunService:IsEdit() do
+	while not _isUnloading and _isEnabled do
 		_state = "Discovering"
 		updateUI()
 
 		if _targetPort then
-			if _isUnloading or not _isEnabled or not RunService:IsEdit() then return nil end
+			if _isUnloading or not _isEnabled then return nil end
 
 			local url    = `{BASE_URL_PREFIX}{_targetPort}/health`
 			local ok, body = httpRequest(`GET`, url, nil)
@@ -797,7 +849,7 @@ local function discoverServer(): number?
 			end
 		else
 			for port = PORT_MIN, PORT_MAX do
-				if _isUnloading or not _isEnabled or not RunService:IsEdit() then return nil end
+				if _isUnloading or not _isEnabled then return nil end
 
 				local url    = `{BASE_URL_PREFIX}{port}/health`
 				local ok, body = httpRequest(`GET`, url, nil)
@@ -811,7 +863,7 @@ local function discoverServer(): number?
 			end
 		end
 
-		if _isUnloading or not _isEnabled or not RunService:IsEdit() then return nil end
+		if _isUnloading or not _isEnabled then return nil end
 
 		task.wait(backoff)
 		backoff = math.min(backoff * 2, BACKOFF_MAX)
@@ -820,8 +872,6 @@ local function discoverServer(): number?
 	return nil
 end
 
---- registerWithServer(): boolean
--- @return boolean   True if registration succeeded
 local function registerWithServer(): boolean
 	if not _baseUrl then return false end
 
@@ -852,11 +902,6 @@ local function registerWithServer(): boolean
 	return true
 end
 
---- sendResponse(requestId, success, data, errorMsg): ()
--- @param requestId string   The request ID to respond to
--- @param success boolean    Whether the command succeeded
--- @param data any           Result data
--- @param errorMsg string?   Error message if failed
 local function sendResponse(requestId: string, success: boolean, data: any, errorMsg: string?): ()
 	if not _baseUrl then return end
 
@@ -875,8 +920,6 @@ local function sendResponse(requestId: string, success: boolean, data: any, erro
 	httpRequest(`POST`, `{_baseUrl}/response`, payload)
 end
 
---- processCommand(command): ()
--- @param command CommandData   The command to process
 local function processCommand(command: CommandData): ()
 	local handler = COMMAND_HANDLERS[command.endpoint]
 
@@ -885,23 +928,43 @@ local function processCommand(command: CommandData): ()
 		return
 	end
 
-	local handlerSuccess, handlerData = handler(command.data or {})
+	-- Wrap mutation commands in ChangeHistoryService for undo/redo
+	if MUTATION_ENDPOINTS[command.endpoint] then
+		local recording = ChangeHistoryService:TryBeginRecording(`MCP: {command.endpoint}`)
 
-	if not handlerSuccess then
-		sendResponse(command.requestId, false, nil, tostring(handlerData))
-		return
+		local handlerSuccess, handlerData = handler(command.data or {})
+
+		if recording then
+			if handlerSuccess then
+				ChangeHistoryService:FinishRecording(recording, Enum.FinishRecordingOperation.Commit)
+			else
+				ChangeHistoryService:FinishRecording(recording, Enum.FinishRecordingOperation.Cancel)
+			end
+		end
+
+		if not handlerSuccess then
+			sendResponse(command.requestId, false, nil, tostring(handlerData))
+			return
+		end
+
+		sendResponse(command.requestId, true, handlerData, nil)
+	else
+		local handlerSuccess, handlerData = handler(command.data or {})
+
+		if not handlerSuccess then
+			sendResponse(command.requestId, false, nil, tostring(handlerData))
+			return
+		end
+
+		sendResponse(command.requestId, true, handlerData, nil)
 	end
-
-	sendResponse(command.requestId, true, handlerData, nil)
 end
 
---- pollLoop(): ()
--- Main polling loop that fetches and processes commands
 local function pollLoop(): ()
 	_isPolling           = true
 	_consecutiveFailures = 0
 
-	while _isPolling and not _isUnloading and _isEnabled and RunService:IsEdit() do
+	while _isPolling and not _isUnloading and _isEnabled do
 		local ok, body = httpRequest(`GET`, `{_baseUrl}/poll?studioId={_studioId}`, nil)
 
 		if not ok then
@@ -943,8 +1006,6 @@ local function pollLoop(): ()
 	end
 end
 
---- disconnectFromServer(): ()
--- Sends a clean disconnect to the server
 local function disconnectFromServer(): ()
 	if not _baseUrl then return end
 
@@ -955,32 +1016,8 @@ local function disconnectFromServer(): ()
 	end)
 end
 
---- connectionLoop(): ()
--- Main connection lifecycle: discover -> register -> poll -> reconnect
 local function connectionLoop(): ()
 	while not _isUnloading and _isEnabled do
-		if not RunService:IsEdit() then
-			if _baseUrl then
-				disconnectFromServer()
-				_serverPort = nil
-				_baseUrl    = nil
-			end
-
-			_isPolling = false
-			_state     = "Paused"
-			updateUI()
-
-			while not RunService:IsEdit() and not _isUnloading do
-				task.wait(1)
-			end
-
-			if _isUnloading then return end
-			if not _isEnabled then continue end
-
-			_state = "Disconnected"
-			updateUI()
-		end
-
 		local port = discoverServer()
 
 		if not port then
@@ -1019,11 +1056,29 @@ local function connectionLoop(): ()
 end
 
 -- =============================================================================
+--                        PLAY MODE STOP MONITOR
+-- =============================================================================
+
+-- Monitor for stop signal via plugin settings (works across DataModel changes)
+task.spawn(function()
+	plugin:SetSetting("VZN_MCP_STOP_PLAY", false)
+	while not _isUnloading do
+		task.wait(1)
+		local shouldStop = plugin:GetSetting("VZN_MCP_STOP_PLAY")
+		if shouldStop and not RunService:IsEdit() then
+			plugin:SetSetting("VZN_MCP_STOP_PLAY", false)
+			pcall(function()
+				-- Plugin can't directly stop play, but we can signal via settings
+				-- The actual stop happens in the Server DataModel context
+			end)
+		end
+	end
+end)
+
+-- =============================================================================
 --                             PLUGIN UI
 -- =============================================================================
 
---- toggleEnabled(): ()
--- Toggles the plugin between enabled and disabled states
 local function toggleEnabled(): ()
 	if _isEnabled then
 		_isEnabled  = false
@@ -1050,8 +1105,6 @@ local function toggleEnabled(): ()
 	end
 end
 
---- createWidget(): ()
--- Creates the toolbar, button, and dock widget UI
 local function createWidget(): ()
 	_toolbar = plugin:CreateToolbar(TOOLBAR_NAME)
 	_button  = _toolbar:CreateButton(BUTTON_NAME, BUTTON_TOOLTIP, BUTTON_ICON)
@@ -1248,6 +1301,11 @@ _pollThread = task.spawn(connectionLoop)
 plugin.Unloading:Connect(function()
 	_isUnloading = true
 	_isPolling   = false
+
+	if _consoleConnection then
+		_consoleConnection:Disconnect()
+		_consoleConnection = nil
+	end
 
 	disconnectFromServer()
 

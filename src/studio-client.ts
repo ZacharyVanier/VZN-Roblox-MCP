@@ -81,4 +81,29 @@ export class StudioClient {
     return this.request("search", { query, className });
   }
 
+  /** Get accumulated console output from Studio. */
+  async getConsoleOutput(): Promise<PluginResponse> {
+    return this.request("getConsoleOutput", {});
+  }
+
+  /** Clear the console output buffer. */
+  async clearConsoleOutput(): Promise<PluginResponse> {
+    return this.request("clearConsoleOutput", {});
+  }
+
+  /** Get current Studio mode (edit, play, or run). */
+  async getStudioMode(): Promise<PluginResponse> {
+    return this.request("getStudioMode", {});
+  }
+
+  /** Start a playtest. Mode: "play" or "run". */
+  async startPlaytest(mode: string): Promise<PluginResponse> {
+    return this.request("startPlaytest", { mode });
+  }
+
+  /** Stop the current playtest. */
+  async stopPlaytest(): Promise<PluginResponse> {
+    return this.request("stopPlaytest", {});
+  }
+
 }
