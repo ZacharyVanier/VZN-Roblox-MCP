@@ -147,7 +147,7 @@ local _toggleButton: TextButton?       = nil
 local _portInputBox: TextBox?           = nil
 local _connectButton: TextButton?       = nil
 
-local PLUGIN_VERSION = "1.5.0"
+local PLUGIN_VERSION = "1.5.1"
 
 -- =============================================================================
 --                            PRIVATE HELPERS
@@ -873,6 +873,12 @@ end
 --- processCommand(command): ()
 -- @param command CommandData   The command to process
 local function processCommand(command: CommandData): ()
+	-- Block commands during Play mode (plugin context cannot execute reliably)
+	if #Players:GetPlayers() > 0 then
+		sendResponse(command.requestId, false, nil, `Studio is currently in Play mode. Please stop the playtest and return to Edit mode before running MCP commands.`)
+		return
+	end
+
 	local handler = COMMAND_HANDLERS[command.endpoint]
 
 	if not handler then

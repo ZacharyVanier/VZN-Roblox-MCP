@@ -152,7 +152,7 @@ local _toggleButton: TextButton?       = nil
 local _portInputBox: TextBox?           = nil
 local _connectButton: TextButton?       = nil
 
-local PLUGIN_VERSION = "1.5.0"
+local PLUGIN_VERSION = "1.5.1"
 
 -- =============================================================================
 --                            PRIVATE HELPERS
